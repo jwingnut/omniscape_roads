@@ -1,0 +1,520 @@
+<<<*** start of generate_condition_raster.py ***>>>
+import os
+import rasterio
+import numpy as np
+
+
+def generate_condition_raster(city_name, pixel_size, edge_buffer, case_folder):
+    output_raster_path = os.path.join(case_folder, f"{city_name}_condition_{pixel_size}m_buffer{edge_buffer}.tif")
+
+    if not os.path.exists(output_raster_path):
+        # Use the source raster (population or vehicle) to get the dimensions
+        source_raster_path = os.path.join(case_folder, f"{city_name}_*_{pixel_size}m_buffer{edge_buffer}.tif")
+        source_raster_path = glob.glob(source_raster_path)[0]  # Get the first match
+
+        with rasterio.open(source_raster_path) as src:
+            source_raster = src.read(1)
+            transform = src.transform
+            crs = src.crs
+
+        condition_raster = np.ones_like(source_raster, dtype=np.int8)
+
+        buffer_pixels = int(edge_buffer / pixel_size)
+        condition_raster[:buffer_pixels, :] = 2
+        condition_raster[-buffer_pixels:, :] = 2
+        condition_raster[:, :buffer_pixels] = 2
+        condition_raster[:, -buffer_pixels:] = 2
+
+        with rasterio.open(output_raster_path, 'w', driver='GTiff', height=condition_raster.shape[0],
+                           width=condition_raster.shape[1], count=1, dtype='int8', crs=crs, transform=transform) as dst:
+            dst.write(condition_raster, 1)
+
+    return output_raster_path<<<*** end of generate_condition_raster.py ***>>>
+
+<<<*** start of generate_conductance_raster.py ***>>>
+import os
+import rasterio
+import numpy as np
+from rasterio.features import rasterize
+import geopandas as gpd
+
+
+def generate_conductance_raster(city_name, graph_path_with_capacity, edge_buffer, pixel_size, source_raster_path,
+                                case_folder):
+    output_raster_path = os.path.join(case_folder, f"{city_name}_conductance_{pixel_size}m_buffer{edge_buffer}.tif")
+
+    if not os.path.exists(output_raster_path):
+        G = gpd.read_file(graph_path_with_capacity)
+
+        with rasterio.open(source_raster_path) as src:
+            transform = src.transform
+            width, height = src.width, src.height
+
+        conductance_raster = rasterize(
+            [(geom, value) for geom, value in zip(G.geometry, G['capacity'])],
+            out_shape=(height, width),
+            transform=transform,
+            fill=0,
+            dtype='float32'
+        )
+
+        with rasterio.open(output_raster_path, 'w', driver='GTiff', height=height, width=width,
+                           count=1, dtype='float32', crs='EPSG:4326', transform=transform) as dst:
+            dst.write(conductance_raster, 1)
+
+    return output_raster_path<<<*** end of generate_conductance_raster.py ***>>>
+
+<<<*** start of generate_population_raster.py ***>>>
+import os
+import geopandas as gpd
+import rasterio
+from rasterio.features import rasterize
+from rasterio.transform import from_origin
+import numpy as np
+from utils.fetch_census_data import fetch_acs_block_group_data, fetch_block_group_geometries
+
+
+def generate_population_raster(city_name, pixel_size, edge_buffer, case_folder, api_key):
+    output_raster_path = os.path.join(case_folder, f"{city_name}_population_{pixel_size}m_buffer{edge_buffer}.tif")
+
+    if not os.path.exists(output_raster_path):
+        state = "06"  # California
+        county = "007"  # Butte County
+        df = fetch_acs_block_group_data(api_key, state, county)
+        gdf_geometries = fetch_block_group_geometries(state, county)
+
+        gdf = gdf_geometries.merge(df, on='GEOID', how='inner')
+        gdf['population'] = gdf['B01003_001E'].astype(int)
+
+        bounds = gdf.total_bounds
+        width = int((bounds[2] - bounds[0]) / pixel_size)
+        height = int((bounds[3] - bounds[1]) / pixel_size)
+        transform = from_origin(bounds[0], bounds[3], pixel_size, pixel_size)
+
+        population_raster = rasterize(
+            [(geom, value) for geom, value in zip(gdf.geometry, gdf['population'])],
+            out_shape=(height, width),
+            transform=transform,
+            fill=0,
+            dtype='float32'
+        )
+
+        # Set edge buffer to zero
+        buffer_pixels = int(edge_buffer / pixel_size)
+        population_raster[:buffer_pixels, :] = 0
+        population_raster[-buffer_pixels:, :] = 0
+        population_raster[:, :buffer_pixels] = 0
+        population_raster[:, -buffer_pixels:] = 0
+
+        with rasterio.open(output_raster_path, 'w', driver='GTiff', height=height, width=width,
+                           count=1, dtype='float32', crs='EPSG:4326', transform=transform) as dst:
+            dst.write(population_raster, 1)
+
+    return output_raster_path<<<*** end of generate_population_raster.py ***>>>
+
+<<<*** start of generate_vehicle_raster.py ***>>>
+import os
+import geopandas as gpd
+import rasterio
+from rasterio.features import rasterize
+from rasterio.transform import from_origin
+import numpy as np
+from utils.fetch_census_data import fetch_acs_block_group_data, fetch_block_group_geometries
+
+
+def generate_vehicle_raster(city_name, pixel_size, edge_buffer, case_folder, api_key):
+    output_raster_path = os.path.join(case_folder, f"{city_name}_vehicles_{pixel_size}m_buffer{edge_buffer}.tif")
+
+    if not os.path.exists(output_raster_path):
+        state = "06"  # California
+        county = "007"  # Butte County
+        df = fetch_acs_block_group_data(api_key, state, county)
+        gdf_geometries = fetch_block_group_geometries(state, county)
+
+        gdf = gdf_geometries.merge(df, on='GEOID', how='inner')
+        gdf['total_vehicles'] = (
+                (gdf['B25044_003E'] * 1) +
+                (gdf['B25044_004E'] * 2) +
+                (gdf['B25044_005E'] * 3) +
+                (gdf['B25044_006E'] * 4) +
+                (gdf['B25044_007E'] * 5)
+        )
+
+        bounds = gdf.total_bounds
+        width = int((bounds[2] - bounds[0]) / pixel_size)
+        height = int((bounds[3] - bounds[1]) / pixel_size)
+        transform = from_origin(bounds[0], bounds[3], pixel_size, pixel_size)
+
+        vehicle_raster = rasterize(
+            [(geom, value) for geom, value in zip(gdf.geometry, gdf['total_vehicles'])],
+            out_shape=(height, width),
+            transform=transform,
+            fill=0,
+            dtype='float32'
+        )
+
+        # Set edge buffer to zero
+        buffer_pixels = int(edge_buffer / pixel_size)
+        vehicle_raster[:buffer_pixels, :] = 0
+        vehicle_raster[-buffer_pixels:, :] = 0
+        vehicle_raster[:, :buffer_pixels] = 0
+        vehicle_raster[:, -buffer_pixels:] = 0
+
+        with rasterio.open(output_raster_path, 'w', driver='GTiff', height=height, width=width,
+                           count=1, dtype='float32', crs='EPSG:4326', transform=transform) as dst:
+            dst.write(vehicle_raster, 1)
+
+    return output_raster_path<<<*** end of generate_vehicle_raster.py ***>>>
+
+<<<*** start of main.py ***>>>
+import argparse
+import os
+from prepare_city_group import prepare_city_group
+from generate_population_raster import generate_population_raster
+from generate_conductance_raster import generate_conductance_raster
+from generate_condition_raster import generate_condition_raster
+from run_omniscape import run_omniscape
+from save_results_to_graphml import save_results_to_graphml
+
+def main():
+    parser = argparse.ArgumentParser(description="Outward Flow Omniscape Analysis (Population-based)")
+    parser.add_argument("--city_name", type=str, required=True)
+    parser.add_argument("--expand_distance", type=int, required=True)
+    parser.add_argument("--pixel_size", type=int, required=True)
+    parser.add_argument("--edge_buffer", type=int, required=True)
+    parser.add_argument("--threads", type=int, required=True)
+    parser.add_argument("--radius", type=int, required=True)
+    parser.add_argument("--block_size", type=int, required=True)
+    args = parser.parse_args()
+
+    base_output_path = "data/output"
+    case_folder = os.path.join(base_output_path, f"{args.city_name}_outward_flow_population")
+    os.makedirs(case_folder, exist_ok=True)
+
+    graph_path_with_capacity = prepare_city_group(args.city_name, args.expand_distance)
+
+    population_raster_path = generate_population_raster(
+        args.city_name, args.pixel_size, args.edge_buffer, case_folder
+    )
+
+    conductance_raster_path = generate_conductance_raster(
+        args.city_name, graph_path_with_capacity, args.edge_buffer, args.pixel_size, population_raster_path, case_folder
+    )
+
+    condition_raster_path = generate_condition_raster(
+        args.city_name, args.pixel_size, args.edge_buffer, case_folder
+    )
+
+    omniscape_output_path = run_omniscape(
+        args.city_name, population_raster_path, conductance_raster_path, condition_raster_path,
+        args.threads, args.radius, args.block_size, args.pixel_size, args.edge_buffer, case_folder
+    )
+
+    if omniscape_output_path:
+        save_results_to_graphml(
+            args.city_name, graph_path_with_capacity, omniscape_output_path,
+            args.radius, args.block_size, args.threads, args.pixel_size, args.edge_buffer, case_folder
+        )
+
+if __name__ == "__main__":
+    main()<<<*** end of main.py ***>>>
+
+<<<*** start of main_vehicle.py ***>>>
+import argparse
+import os
+from prepare_city_group import prepare_city_group
+from generate_vehicle_raster import generate_vehicle_raster
+from generate_conductance_raster import generate_conductance_raster
+from generate_condition_raster import generate_condition_raster
+from run_omniscape import run_omniscape
+from save_results_to_graphml import save_results_to_graphml
+
+def main():
+    parser = argparse.ArgumentParser(description="Outward Flow Omniscape Analysis (Vehicle-based)")
+    parser.add_argument("--city_name", type=str, required=True)
+    parser.add_argument("--expand_distance", type=int, required=True)
+    parser.add_argument("--pixel_size", type=int, required=True)
+    parser.add_argument("--edge_buffer", type=int, required=True)
+    parser.add_argument("--threads", type=int, required=True)
+    parser.add_argument("--radius", type=int, required=True)
+    parser.add_argument("--block_size", type=int, required=True)
+    parser.add_argument("--census_api_key", type=str, required=True)
+    args = parser.parse_args()
+
+    base_output_path = "data/output"
+    case_folder = os.path.join(base_output_path, f"{args.city_name}_outward_flow_vehicle")
+    os.makedirs(case_folder, exist_ok=True)
+
+    graph_path_with_capacity = prepare_city_group(args.city_name, args.expand_distance)
+
+    vehicle_raster_path = generate_vehicle_raster(
+        args.city_name, args.pixel_size, args.edge_buffer, case_folder, args.census_api_key
+    )
+
+    conductance_raster_path = generate_conductance_raster(
+        args.city_name, graph_path_with_capacity, args.edge_buffer, args.pixel_size, vehicle_raster_path, case_folder
+    )
+
+    condition_raster_path = generate_condition_raster(
+        args.city_name, args.pixel_size, args.edge_buffer, case_folder
+    )
+
+    omniscape_output_path = run_omniscape(
+        args.city_name, vehicle_raster_path, conductance_raster_path, condition_raster_path,
+        args.threads, args.radius, args.block_size, args.pixel_size, args.edge_buffer, case_folder
+    )
+
+    if omniscape_output_path:
+        save_results_to_graphml(
+            args.city_name, graph_path_with_capacity, omniscape_output_path,
+            args.radius, args.block_size, args.threads, args.pixel_size, args.edge_buffer, case_folder
+        )
+
+if __name__ == "__main__":
+    main()<<<*** end of main_vehicle.py ***>>>
+
+<<<*** start of prepare_city_group.py ***>>>
+import os
+from utils.download_graph import download_graph
+from utils.add_capacity import add_capacity
+
+def prepare_city_group(city_name, expand_distance):
+    graph_path = download_graph(city_name, expand_distance)
+    graph_path_with_capacity = add_capacity(graph_path)
+    return graph_path_with_capacity<<<*** end of prepare_city_group.py ***>>>
+
+<<<*** start of run_omniscape.py ***>>>
+import os
+import subprocess
+
+
+def run_omniscape(city_name, source_raster_path, conductance_raster_path, condition_raster_path,
+                  threads, radius, block_size, pixel_size, edge_buffer, case_folder):
+    ini_path = os.path.join(case_folder, "omniscape_config.ini")
+
+    with open(ini_path, "w") as f:
+        f.write(f"""
+[Options]
+resistance_file = {conductance_raster_path}
+source_file = {source_raster_path}
+condition1_file = {condition_raster_path}
+radius = {radius}
+block_size = {block_size}
+project_name = {city_name}_outward_flow
+calc_normalized_current = true
+calc_flow_potential = true
+allow_different_projections = true
+connect_four_neighbors_only = false
+solver = cg+amg
+parallelize = true
+parallel_batch_size = 10
+
+[Conditional Connectivity Options]
+conditional = true
+n_conditions = 1
+comparison1 = equal
+        """)
+
+    env = os.environ.copy()
+    env["JULIA_NUM_THREADS"] = str(threads)
+
+    subprocess.run(["julia", "-e", f"using Omniscape; run_omniscape(\"{ini_path}\")"],
+                   cwd=case_folder, env=env)
+
+    output_dir = os.path.join(case_folder, f"{city_name}_outward_flow")
+    if os.path.exists(output_dir):
+        return output_dir
+    else:
+        return None<<<*** end of run_omniscape.py ***>>>
+
+<<<*** start of save_results_to_graphml.py ***>>>
+import os
+import networkx as nx
+import geopandas as gpd
+import rasterio
+import numpy as np
+
+def save_results_to_graphml(city_name, graph_path_with_capacity, omniscape_output_path,
+                            radius, block_size, threads, pixel_size, edge_buffer, case_folder):
+    G = nx.read_graphml(graph_path_with_capacity)
+    edges_gdf = gpd.read_file(graph_path_with_capacity, layer='edges')
+
+    raster_files = {
+        "cum_currmap.tif": "cum_flow",
+        "flow_potential.tif": "flow_pot",
+        "normalized_cum_currmap.tif": "norm_flow"
+    }
+
+    for raster_filename, attr_name in raster_files.items():
+        raster_path = os.path.join(omniscape_output_path, raster_filename)
+        with rasterio.open(raster_path) as src:
+            for idx, row in edges_gdf.iterrows():
+                coords = row.geometry.coords
+                values = [src.sample([(x, y)])[0][0] for x, y in coords]
+                edges_gdf.loc[idx, attr_name] = np.mean(values)
+
+    for attr in raster_files.values():
+        nx.set_edge_attributes(G, edges_gdf.set_index(['u', 'v', 'key'])[attr].to_dict(), attr)
+
+    output_graphml = os.path.join(case_folder, f"{city_name}_network_with_flow.graphml")
+    nx.write_graphml(G, output_graphml)
+
+    return output_graphml<<<*** end of save_results_to_graphml.py ***>>>
+
+<<<*** start of add_capacity.py ***>>>
+import osmnx as ox
+import networkx as nx
+import numpy as np
+import pandas as pd
+import re
+
+def extract_numeric(value):
+    if isinstance(value, str):
+        match = re.search(r'(\d+(\.\d+)?)', value)
+        if match:
+            return float(match.group(1))
+    elif isinstance(value, (int, float)):
+        return float(value)
+    return np.nan
+
+def convert_lists_to_strings(value):
+    if isinstance(value, list):
+        return ', '.join(value)
+    return value
+
+def correct_speed_lanes_highway(arcs_parameters):
+    # Ensuring no SettingWithCopyWarnings
+    arcs_parameters = arcs_parameters.copy()
+    arcs_parameters['maxspeed'] = arcs_parameters['maxspeed'].fillna('0 mph')
+    arcs_parameters['lanes'] = arcs_parameters['lanes'].fillna(0)
+
+    arcs_parameters['maxspeed'] = arcs_parameters['maxspeed'].apply(extract_numeric)
+    arcs_parameters['lanes'] = pd.to_numeric(arcs_parameters['lanes'], errors='coerce', downcast='float')
+
+    # Apply the custom function to the entire column
+    arcs_parameters["highway"] = arcs_parameters["highway"].apply(convert_lists_to_strings)
+    condition = (arcs_parameters['highway'] == 'unclassified')
+    arcs_parameters.loc[condition, 'highway'] = 'residential'
+
+    condition = (arcs_parameters['highway'] == 'residential, unclassified')
+    arcs_parameters.loc[condition, 'highway'] = 'residential'
+
+    condition = (arcs_parameters['highway'] == 'unclassified, residential')
+    arcs_parameters.loc[condition, 'highway'] = 'residential'
+
+    condition = (arcs_parameters['highway'] == 'residential, tertiary')
+    arcs_parameters.loc[condition, 'highway'] = 'residential'
+
+    condition = (arcs_parameters['highway'] == 'tertiary, residential')
+    arcs_parameters.loc[condition, 'highway'] = 'residential'
+
+    arcs_parameters = arcs_parameters[['highway', 'length', 'maxspeed', 'lanes', 'geometry']]
+
+    # Define the conditions and corresponding speeds
+    conditions = [
+        (arcs_parameters['highway'] == 'motorway'),
+        (arcs_parameters['highway'] == 'motorway_link'),
+        (arcs_parameters['highway'] == 'trunk'),
+        (arcs_parameters['highway'] == 'trunk_link'),
+        (arcs_parameters['highway'] == 'primary'),
+        (arcs_parameters['highway'] == 'primary_link'),
+        (arcs_parameters['highway'] == 'secondary'),
+        (arcs_parameters['highway'] == 'tertiary'),
+        (arcs_parameters['highway'] == 'minor'),
+        (arcs_parameters['highway'] == 'unclassified'),
+        (arcs_parameters['highway'] == 'residential'),
+        (arcs_parameters['highway'] == 'living_street'),
+        (arcs_parameters['highway'] == 'Phantom')
+    ]
+
+    speeds = [100, 60, 50, 50, 50, 50, 50, 30, 30, 30, 30, 15, 1000]  # Corresponding speeds for the conditions km/h
+    average_speed = [1.2, 1.2, 0.5, 0.5, 0.5, 0.5, 0.5, 0.8, 0.8, 0.8, 0.6, 1.0, 1.0]  # Corresponding speeds for the conditions
+    capacity = [2000, 1500, 1000, 1000, 1000, 1000, 1000, 600, 600, 600, 600, 300, 100000]  # veh/h
+    number_lanes = [2, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1000]
+
+    # Create the 'speed' column based on the conditions
+    arcs_parameters['speed'] = np.select(conditions, speeds, default=0)  # Default speed is 0 for unmatched conditions
+    arcs_parameters['average_speed'] = np.select(conditions, average_speed, default=0)  # Default speed is 0 for unmatched conditions
+    arcs_parameters['capacity'] = np.select(conditions, capacity, default=0)  # Default speed is 0 for unmatched conditions
+    arcs_parameters['number_lanes'] = np.select(conditions, number_lanes, default=0)  # Default speed is 0 for unmatched conditions
+
+    arcs_parameters['max_lanes'] = arcs_parameters[['lanes', 'number_lanes']].max(axis=1)
+    arcs_parameters['capacity'] = arcs_parameters['capacity'] * arcs_parameters['max_lanes']
+    arcs_parameters['resistance'] = 1 / arcs_parameters['capacity'] * arcs_parameters['capacity'].max()
+
+    return arcs_parameters
+
+def add_capacity(graph_path):
+    G_road_network = ox.load_graphml(graph_path)
+    nodes, edges = ox.graph_to_gdfs(G_road_network, nodes=True, edges=True)
+
+    edges = correct_speed_lanes_highway(edges)
+
+    G_road_network = ox.graph_from_gdfs(nodes, edges)
+
+    output_path = graph_path.replace('.graphml', '_with_capacity.graphml')
+    ox.save_graphml(G_road_network, output_path)
+
+    return output_path<<<*** end of add_capacity.py ***>>>
+
+<<<*** start of download_graph.py ***>>>
+import osmnx as ox
+import os
+
+
+def download_graph(city_name, expand_distance):
+    graph_path = f"data/input/{city_name}_road_network.graphml"
+
+    if not os.path.exists(graph_path):
+        G = ox.graph_from_place(f"{city_name}, California, USA", network_type="drive")
+        G = ox.project_graph(G)
+        G = ox.consolidate_intersections(G, rebuild_graph=True, tolerance=15, dead_ends=False)
+        G = ox.add_edge_speeds(G)
+        G = ox.add_edge_travel_times(G)
+        ox.save_graphml(G, graph_path)
+
+    return graph_path<<<*** end of download_graph.py ***>>>
+
+<<<*** start of fetch_census_data.py ***>>>
+import requests
+import geopandas as gpd
+import pandas as pd
+
+
+def fetch_acs_block_group_data(api_key, state, county):
+    url = f"https://api.census.gov/data/2019/acs/acs5"
+    params = {
+        'get': 'B25044_001E,B25044_002E,B25044_003E,B25044_004E,B25044_005E,B25044_006E,B25044_007E',
+        'for': f'block group:*',
+        'in': f'state:{state} county:{county}',
+        'key': api_key
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    columns = data[0]
+    df = pd.DataFrame(data[1:], columns=columns)
+
+    return df
+
+
+def fetch_block_group_geometries(state, county):
+    url = f"https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Tracts_Blocks/MapServer/8/query"
+    params = {
+        'where': f"STATE='{state}' AND COUNTY='{county}'",
+        'outFields': '*',
+        'returnGeometry': 'true',
+        'f': 'geojson',
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    gdf = gpd.GeoDataFrame.from_features(data['features'], crs='EPSG:4326')
+    return gdf<<<*** end of fetch_census_data.py ***>>>
+
+<<<*** start of __init__.py ***>>>
+<<<*** end of __init__.py ***>>>
+
+<<<*** start of __init__.py ***>>>
+<<<*** end of __init__.py ***>>>
+
